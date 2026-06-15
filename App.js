@@ -170,6 +170,113 @@ function Section({ title, children }) {
   );
 }
 
+function getMealTimestamp(food) {
+  return food.loggedAt || food.createdAt || food.date || null;
+}
+
+function getMealDate(food) {
+  const timestamp = getMealTimestamp(food);
+  const date = timestamp ? new Date(timestamp) : new Date();
+
+  return Number.isNaN(date.getTime()) ? new Date() : date;
+}
+
+function dateKey(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+
+  return `${year}-${month}-${day}`;
+}
+
+function getMealDateKey(food) {
+  return dateKey(getMealDate(food));
+}
+
+function formatDateHeading(key) {
+  const [year, month, day] = key.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+
+  return date.toLocaleDateString([], {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+function formatDateShort(key) {
+  const [year, month, day] = key.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+
+  return date.toLocaleDateString([], {
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+function getMealTime(food) {
+  if (food.analyzedAt) return food.analyzedAt;
+
+  const timestamp = getMealTimestamp(food);
+  if (!timestamp) return null;
+
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function getFoodKey(food, index) {
+  return food.id || `${food.name}-${getMealTimestamp(food) || index}`;
+}
+
+function calculateTotals(meals) {
+  return meals.reduce(
+    (sum, food) => ({
+      calories: sum.calories + Number(food.calories || 0),
+      protein: sum.protein + Number(food.protein || 0),
+      carbs: sum.carbs + Number(food.carbs || 0),
+      fat: sum.fat + Number(food.fat || 0),
+      fiber: sum.fiber + Number(food.fiber || 0),
+      sodium: sum.sodium + Number(food.sodium || 0),
+    }),
+    { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sodium: 0 }
+  );
+}
+
+function FoodLogList({ foods, emptyText }) {
+  if (!foods.length) {
+    return (
+      <View style={styles.emptyState}>
+        <Text style={styles.emptyStateText}>{emptyText}</Text>
+      </View>
+    );
+  }
+
+  return foods.map((food, index) => {
+    const mealTime = getMealTime(food);
+
+    return (
+      <View key={getFoodKey(food, index)} style={styles.foodLogItem}>
+        <View style={styles.foodLogTop}>
+          <View style={styles.foodLogCopy}>
+            <Text style={styles.foodName}>{food.name}</Text>
+            <Text style={styles.foodMeta}>
+              {food.meal}
+              {mealTime ? ` at ${mealTime}` : ''}
+            </Text>
+          </View>
+          <Text style={styles.foodNumbers}>{food.calories} cal</Text>
+        </View>
+        <Text style={styles.foodDetail}>
+          {food.protein}g protein / {food.carbs}g carbs / {food.fat}g fat / {food.fiber}g fiber / {food.sodium}mg sodium
+        </Text>
+      </View>
+    );
+  });
+}
+
 async function analyzeMealPhoto(asset, restrictions) {
   await new Promise((resolve) => setTimeout(resolve, 900));
 
@@ -285,6 +392,7 @@ function toAppMeal(meal) {
     confidence: meal.confidence,
     notes: meal.notes,
     imageUri: meal.photoUrl,
+    loggedAt: meal.loggedAt,
     analyzedAt: meal.loggedAt
       ? new Date(meal.loggedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
       : null,
@@ -404,6 +512,7 @@ export default function App() {
   const [apiStatus, setApiStatus] = useState('Not signed in');
   const [activeTab, setActiveTab] = useState('Today');
   const [foods, setFoods] = useState(defaultFoods);
+  const [selectedHistoryDate, setSelectedHistoryDate] = useState(null);
   const [foodName, setFoodName] = useState('');
   const [selectedMealType, setSelectedMealType] = useState('breakfast');
   const [photoStatus, setPhotoStatus] = useState('Upload a plate photo for nutrient estimates.');
@@ -475,17 +584,30 @@ export default function App() {
     return [...new Set(items)].slice(0, 8);
   }, [activeConcerns]);
 
-  const totals = foods.reduce(
-    (sum, food) => ({
-      calories: sum.calories + food.calories,
-      protein: sum.protein + food.protein,
-      carbs: sum.carbs + food.carbs,
-      fat: sum.fat + food.fat,
-      fiber: sum.fiber + food.fiber,
-      sodium: sum.sodium + food.sodium,
-    }),
-    { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0, sodium: 0 }
+  const todayKey = dateKey(new Date());
+  const todayFoods = useMemo(
+    () => foods.filter((food) => getMealDateKey(food) === todayKey),
+    [foods, todayKey]
   );
+  const totals = useMemo(() => calculateTotals(todayFoods), [todayFoods]);
+  const historyDays = useMemo(() => {
+    const days = foods.reduce((groups, food) => {
+      const key = getMealDateKey(food);
+      const meals = groups[key] || [];
+      groups[key] = [...meals, food];
+      return groups;
+    }, {});
+
+    return Object.entries(days)
+      .map(([key, meals]) => ({
+        key,
+        meals,
+        totals: calculateTotals(meals),
+      }))
+      .sort((a, b) => b.key.localeCompare(a.key));
+  }, [foods]);
+  const activeHistoryDay =
+    historyDays.find((day) => day.key === selectedHistoryDate) || historyDays[0] || null;
 
   const planDays = planLength === 'Weekly' ? 7 : 14;
   const plan = Array.from({ length: Math.min(planDays, 7) }, (_, index) => {
@@ -511,6 +633,7 @@ export default function App() {
       fat: 10,
       fiber: 5,
       sodium: restrictions.includes('Low sodium') ? 180 : 360,
+      loggedAt: new Date().toISOString(),
     };
 
     setFoods([meal, ...foods]);
@@ -563,6 +686,7 @@ export default function App() {
           : await analyzeMealPhoto(asset, restrictions);
       analysis.meal = selectedMealType[0].toUpperCase() + selectedMealType.slice(1);
       analysis.mealType = selectedMealType;
+      analysis.loggedAt = new Date().toISOString();
       setLastAnalysis(analysis);
       setFoods([analysis, ...foods]);
       setPhotoStatus(`${analysis.name.replace('Photo scan: ', '')} added with ${analysis.confidence.toLowerCase()} confidence.`);
@@ -607,7 +731,7 @@ export default function App() {
       <Text style={styles.syncStatus}>{apiStatus}</Text>
 
       <View style={styles.tabs}>
-        {['Today', 'Planner', 'Profile'].map((tab) => (
+        {['Today', 'History', 'Planner', 'Profile'].map((tab) => (
           <Pressable
             key={tab}
             onPress={() => setActiveTab(tab)}
@@ -703,24 +827,59 @@ export default function App() {
             </Section>
 
             <Section title="Today">
-              {foods.map((food, index) => (
-                <View key={`${food.name}-${index}`} style={styles.foodLogItem}>
-                  <View style={styles.foodLogTop}>
-                    <View style={styles.foodLogCopy}>
-                      <Text style={styles.foodName}>{food.name}</Text>
-                      <Text style={styles.foodMeta}>
-                        {food.meal}
-                        {food.analyzedAt ? ` at ${food.analyzedAt}` : ''}
+              <FoodLogList foods={todayFoods} emptyText="No meals logged today yet." />
+            </Section>
+          </>
+        )}
+
+        {activeTab === 'History' && (
+          <>
+            <Section title="Logged days">
+              {historyDays.length ? (
+                historyDays.map((day) => (
+                  <Pressable
+                    key={day.key}
+                    onPress={() => setSelectedHistoryDate(day.key)}
+                    style={({ pressed }) => [
+                      styles.historyDay,
+                      activeHistoryDay?.key === day.key && styles.historyDayActive,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <View style={styles.historyDayCopy}>
+                      <Text style={styles.historyDate}>{formatDateHeading(day.key)}</Text>
+                      <Text style={styles.historyMeta}>
+                        {day.meals.length} {day.meals.length === 1 ? 'meal' : 'meals'} logged
                       </Text>
                     </View>
-                    <Text style={styles.foodNumbers}>{food.calories} cal</Text>
-                  </View>
-                  <Text style={styles.foodDetail}>
-                    {food.protein}g protein / {food.carbs}g carbs / {food.fat}g fat / {food.fiber}g fiber / {food.sodium}mg sodium
-                  </Text>
+                    <View style={styles.historyDayStats}>
+                      <Text style={styles.historyCalories}>{day.totals.calories}</Text>
+                      <Text style={styles.historyCaloriesLabel}>cal</Text>
+                    </View>
+                  </Pressable>
+                ))
+              ) : (
+                <View style={styles.emptyState}>
+                  <Text style={styles.emptyStateText}>Logged meals will appear here by day.</Text>
                 </View>
-              ))}
+              )}
             </Section>
+
+            {activeHistoryDay && (
+              <>
+                <Section title={formatDateShort(activeHistoryDay.key)}>
+                  <View style={styles.metricsRow}>
+                    <Metric label="calories" value={activeHistoryDay.totals.calories} />
+                    <Metric label="protein" value={`${activeHistoryDay.totals.protein}g`} />
+                    <Metric label="fiber" value={`${activeHistoryDay.totals.fiber}g`} />
+                  </View>
+                  <FoodLogList
+                    foods={activeHistoryDay.meals}
+                    emptyText="No meals logged for this day."
+                  />
+                </Section>
+              </>
+            )}
           </>
         )}
 
@@ -1184,6 +1343,60 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
     marginTop: 8,
+  },
+  emptyState: {
+    backgroundColor: '#ffffff',
+    borderColor: '#e0e5dc',
+    borderRadius: 8,
+    borderWidth: 1,
+    padding: 16,
+  },
+  emptyStateText: {
+    color: '#60736b',
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  historyDay: {
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderColor: '#e0e5dc',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+    marginBottom: 10,
+    padding: 14,
+  },
+  historyDayActive: {
+    borderColor: '#176b56',
+  },
+  historyDayCopy: {
+    flex: 1,
+  },
+  historyDate: {
+    color: '#18352e',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  historyMeta: {
+    color: '#6e7d77',
+    fontSize: 13,
+    marginTop: 2,
+  },
+  historyDayStats: {
+    alignItems: 'flex-end',
+  },
+  historyCalories: {
+    color: '#176b56',
+    fontSize: 17,
+    fontWeight: '800',
+  },
+  historyCaloriesLabel: {
+    color: '#61736b',
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
   },
   fieldLabel: {
     color: '#485c54',
